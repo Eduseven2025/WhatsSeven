@@ -1,49 +1,78 @@
+const venom = require('venom-bot');
 const express = require('express');
-const { create, ev } = require('venom-bot');
+const qrcode = require('qrcode');
 const app = express();
+const port = process.env.PORT || 8080;
 
-const sessions = {};
+app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('WhatsSeven rodando com sucesso ✅');
-});
+const sessions = {}; // armazena sessões em memória { id: client }
 
-app.get('/qr/:session', async (req, res) => {
-  const sessionName = req.params.session;
+// Rota para criar/conectar sessão e gerar QR Code
+app.get('/qr/:id', async (req, res) => {
+  const id = req.params.id;
 
-  if (sessions[sessionName]) {
-    return res.send(`Sessão "${sessionName}" já conectada! ✅`);
+  if (sessions[id]) {
+    return res.json({ status: 'success', message: 'Sessão já conectada' });
   }
 
   try {
-    const client = await create({
-      session: sessionName,
-      multidevice: true,
-      headless: true,
-      disableWelcome: true,
-      disableSpins: true,
-      catchQR: (base64Qr) => {
-        console.log(`QR gerado para ${sessionName}`);
-        sessions[sessionName] = { qr: base64Qr };
+    sessions[id] = await venom.create(
+      id,
+      (base64Qr, asciiQR) => {
+        // QR code em base64 para exibir
+        qrcode.toDataURL(base64Qr).then((url) => {
+          res.json({ qr: url });
+        });
       },
-      statusFind: (statusSession, session) => {
-        console.log(`Status da sessão ${session}:`, statusSession);
-      },
-    });
+      undefined,
+      { headless: true }
+    );
 
-    sessions[sessionName].client = client;
-
-    res.send({
-      status: 'aguardando leitura do QR Code',
-      qr: sessions[sessionName].qr,
+    sessions[id].onStateChange((state) => {
+      console.log(`Session ${id} state:`, state);
+      if (state === 'CONNECTED') {
+        console.log(`Sessão ${id} conectada!`);
+      }
+      if (state === 'DISCONNECTED' || state === 'UNPAIRED') {
+        console.log(`Sessão ${id} desconectada! Removendo...`);
+        sessions[id].close();
+        delete sessions[id];
+      }
     });
   } catch (error) {
-    console.error('Erro ao criar sessão:', error);
-    res.status(500).send({ status: 'erro', error: error.message });
+    console.error('Erro criando sessão:', error);
+    res.status(500).json({ status: 'error', error: error.toString() });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor WhatsSeven rodando na porta ${PORT} 🚀`);
+// Rota para enviar mensagem via sessão existente
+app.post('/send/:id', async (req, res) => {
+  const id = req.params.id;
+  const { to, message } = req.body;
+
+  if (!sessions[id]) {
+    return res.status(404).json({ status: 'error', error: 'Sessão não encontrada' });
+  }
+
+  if (!to || !message) {
+    return res.status(400).json({ status: 'error', error: 'Parâmetros "to" e "message" são obrigatórios' });
+  }
+
+  try {
+    await sessions[id].sendText(to, message);
+    res.json({ status: 'success', message: 'Mensagem enviada' });
+  } catch (error) {
+    console.error('Erro enviando mensagem:', error);
+    res.status(500).json({ status: 'error', error: error.toString() });
+  }
 });
+
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'Servidor rodando' });
+});
+
+app.listen(port, () => {
+  console.log(`Servidor rodando na porta ${port}`);
+});
+
